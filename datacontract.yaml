@@ -1,0 +1,128 @@
+dataContractSpecification: 0.9.3
+id: urn:datacontract:day17:orders
+info:
+  title: Orders Data Contract
+  version: 1.0.0
+  description: >
+    Schema-as-contract for the orders pipeline (Bronze -> Silver -> Gold).
+    Silver is the canonical clean layer: deduped on order_id, bad rows quarantined
+    to quarantine.csv before this table is populated (see pipeline/validate.py).
+  owner: datadreamers
+  contact:
+    name: Track 2 Team
+    url: https://github.com/Datadreamers/Day17-Track2-DataPipeline-Lab
+
+servers:
+  local:
+    type: duckdb
+    path: warehouse.duckdb
+    description: Local DuckDB warehouse (lite path, zero-key)
+
+terms:
+  usage: Internal analytics and ML feature engineering only
+  limitations: >
+    Silver dedups on order_id (latest row wins). Any order_id appearing in
+    quarantine.csv was rejected by the quality gate and must NOT be used for
+    model training without remediation.
+
+models:
+  silver_orders:
+    description: >
+      Clean, deduplicated orders (Silver layer). One row per order_id.
+      Bad records (null user_id, negative amount, unknown status) are
+      quarantined before this table is written.
+    type: table
+    fields:
+      order_id:
+        type: integer
+        description: Natural key — unique per order
+        required: true
+        unique: true
+        minimum: 1
+      user_id:
+        type: string
+        description: Non-null customer identifier
+        required: true
+        minLength: 1
+      product:
+        type: string
+        description: Product name (free text, non-null)
+        required: true
+      amount:
+        type: number
+        description: Order amount in USD, must be strictly positive
+        required: true
+        exclusiveMinimum: 0.0
+      status:
+        type: string
+        description: Order lifecycle status
+        required: true
+        enum:
+          - completed
+          - pending
+          - refunded
+          - cancelled
+      created_at:
+        type: string
+        description: ISO date string (YYYY-MM-DD) of order creation
+        required: true
+        pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+
+  gold_daily_orders:
+    description: >
+      Daily business aggregates over completed orders only (Gold layer).
+      Consumed by BI and as ML features. One row per order_date.
+    type: table
+    fields:
+      order_date:
+        type: string
+        description: Aggregation date (YYYY-MM-DD)
+        required: true
+        unique: true
+      n_orders:
+        type: integer
+        description: Count of completed orders on this date
+        required: true
+        minimum: 1
+      n_users:
+        type: integer
+        description: Count of distinct users with completed orders
+        required: true
+        minimum: 1
+      revenue:
+        type: number
+        description: Total revenue from completed orders (2 dp)
+        required: true
+        exclusiveMinimum: 0.0
+      avg_order_value:
+        type: number
+        description: Mean completed-order amount (2 dp)
+        required: true
+        exclusiveMinimum: 0.0
+
+quality:
+  type: SodaCL
+  specification: |
+    checks for silver_orders:
+      - row_count > 0:
+          name: silver has rows
+      - duplicate_count(order_id) = 0:
+          name: no duplicate order_id in silver
+      - missing_count(user_id) = 0:
+          name: no null user_id
+      - missing_count(amount) = 0:
+          name: no null amount
+      - values in (status) must be in [completed, pending, refunded, cancelled]:
+          name: status vocabulary
+      - min(amount) > 0:
+          name: amount strictly positive
+
+    checks for gold_daily_orders:
+      - row_count > 0:
+          name: gold has rows
+      - duplicate_count(order_date) = 0:
+          name: one row per date
+      - min(revenue) > 0:
+          name: revenue positive
+      - min(n_orders) >= 1:
+          name: at least one order per date row

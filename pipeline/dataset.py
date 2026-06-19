@@ -85,6 +85,46 @@ def decontaminate(pairs: list[dict], eval_set: list[dict]) -> list[dict]:
     return [p for p in pairs if _norm(p["prompt"]) not in held_out]
 
 
+# ---------------------------------------------------------------------------
+# Extension exercise 0 — Fuzzy decontamination (n-gram overlap)
+# ---------------------------------------------------------------------------
+
+def _ngrams(text: str, n: int) -> set[str]:
+    """Return the set of n-grams (space-joined token windows) in text."""
+    tokens = text.split()
+    if len(tokens) < n:
+        return set()
+    return {" ".join(tokens[i : i + n]) for i in range(len(tokens) - n + 1)}
+
+
+def decontaminate_fuzzy(
+    pairs: list[dict],
+    eval_set: list[dict],
+    n: int = 13,
+) -> list[dict]:
+    """N-gram decontamination: drop pairs that share ANY n-gram with eval inputs.
+
+    Even a lightly reworded eval prompt shares long n-grams with the original.
+    n=13 is the WMT / LM-training convention for dedup (long enough to be
+    meaningful, short enough to catch near-duplicates). Adjust downward for
+    short prompts (e.g. n=5 for sentence-length inputs).
+
+    Demo: a paraphrase of "Can I return a widget I bought 10 days ago?" would
+    still share the 5-gram "return a widget I bought" and be dropped — exact
+    match would miss it.
+    """
+    eval_ngrams: set[str] = set()
+    for e in eval_set:
+        eval_ngrams.update(_ngrams(_norm(e["input"]), n))
+
+    clean = []
+    for p in pairs:
+        pair_ngrams = _ngrams(_norm(p["prompt"]), n)
+        if not (pair_ngrams & eval_ngrams):
+            clean.append(p)
+    return clean
+
+
 def write_jsonl(rows: list[dict], path: Path) -> int:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:

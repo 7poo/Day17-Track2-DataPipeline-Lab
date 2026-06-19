@@ -15,6 +15,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Callable
 
 _PRODUCTS = ["widget", "gadget", "sprocket"]
 
@@ -160,6 +161,73 @@ def _sentence_chunks(docs_dir: Path) -> list[str]:
                 if sent.strip():
                     chunks.append(sent.strip())
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# Extension exercise 2 — LLM-based triple extractor (§13)
+# ---------------------------------------------------------------------------
+
+def extract_triples_llm(
+    text: str,
+    llm_fn: Callable[[str], str],
+) -> list[tuple[str, str, str]]:
+    """LLM-powered triple extractor — drop-in replacement for extract_triples().
+
+    llm_fn(prompt: str) -> str  can be any callable:
+        - a real LLM: lambda p: anthropic_client.messages.create(model=..., messages=[{"role":"user","content":p}]).content[0].text
+        - a local model via Ollama: lambda p: requests.post("http://localhost:11434/api/generate", json={"model":"llama3","prompt":p}).json()["response"]
+        - mock_llm() below for zero-key testing
+
+    Entity resolution runs the same _canon() map as the rule-based extractor, so
+    all downstream graph code (build_graph, traverse, returnable_products) is
+    unchanged. That substitutability is the lesson of §13.
+    """
+    prompt = (
+        "Extract factual (subject, relation, object) triples from the text below.\n"
+        "Output exactly one triple per line as: subject | RELATION | object\n"
+        "Use UPPERCASE_SNAKE_CASE for relations (e.g. RETURNABLE_WITHIN, HAS_WARRANTY).\n"
+        "Only output triples, nothing else.\n\n"
+        f"Text:\n{text}\n\nTriples:"
+    )
+    response = llm_fn(prompt)
+    triples: list[tuple[str, str, str]] = []
+    for line in response.strip().splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 3:
+            continue
+        subj, rel, obj = parts
+        subj, obj = _canon(subj), _canon(obj)
+        rel = rel.upper().replace(" ", "_")
+        if subj and rel and obj:
+            triples.append((subj, rel, obj))
+    return triples
+
+
+def mock_llm(prompt: str) -> str:  # noqa: ARG001
+    """Deterministic mock LLM for zero-key testing of the LLM-extractor path.
+
+    In production replace this with a real API call — the pipeline is identical.
+    Shows the five triples that exercise 2 is expected to produce from the seed
+    docs so tests can verify the round-trip without network access.
+    """
+    return (
+        "widget | RETURNABLE_WITHIN | 30 days\n"
+        "gadget | HAS_WARRANTY | 90 days\n"
+        "sprocket | NON_RETURNABLE | final sale\n"
+        "widget | IS_A | accessory\n"
+        "accessories | SHIPS_FROM | hanoi fulfillment center\n"
+    )
+
+
+def ingest_docs_to_graph_llm(docs_dir: Path, llm_fn: Callable[[str], str] = mock_llm) -> dict:
+    """Same pipeline as ingest_docs_to_graph but using LLM extraction.
+
+    Swap llm_fn for a real model and all downstream graph queries still work.
+    """
+    triples: list[tuple[str, str, str]] = []
+    for path in sorted(Path(docs_dir).glob("*.md")):
+        triples.extend(extract_triples_llm(path.read_text(encoding="utf-8"), llm_fn))
+    return build_graph(triples)
 
 
 def vector_foil(docs_dir: Path, subject: str, answer_hint: str) -> dict:
